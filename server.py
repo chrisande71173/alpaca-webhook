@@ -3,8 +3,8 @@ from datetime import datetime
 import pytz
 from flask import Flask, request, jsonify
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -126,6 +126,23 @@ def webhook():
         # For SELL orders, check if we have an open position first
         if is_sell:
             try:
+                # Check for existing open/pending sell orders to prevent duplicates
+                open_orders = trading_client.get_orders(
+                    filter=GetOrdersRequest(
+                        status=QueryOrderStatus.OPEN,
+                        symbols=[symbol],
+                        side=OrderSide.SELL
+                    )
+                )
+                if open_orders:
+                    pending_qty = sum(float(o.qty) - float(o.filled_qty) for o in open_orders)
+                    print(f"SKIP: {symbol} already has {len(open_orders)} open sell order(s) ({pending_qty} shares pending)")
+                    return jsonify({
+                        "status": "skipped",
+                        "reason": f"Existing sell order(s) for {symbol} ({pending_qty} shares pending)",
+                        "symbol": symbol
+                    }), 200
+
                 position = trading_client.get_open_position(symbol)
                 total_qty = float(position.qty)
                 
