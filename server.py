@@ -23,7 +23,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 # Percentage of account to use per trade
 TRADE_PERCENT = 0.01  # 1% of account balance
 MIN_NOTIONAL = 1.00   # Minimum dollar amount for an order
-LIMIT_PRICE_BUFFER = 0.01  # 1% buffer for limit orders
+LIMIT_PRICE_BUFFER = 0.05  # 5% buffer for limit orders
 
 # Track non-tradable assets to avoid repeated failures
 non_tradable_assets = set()
