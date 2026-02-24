@@ -1,0 +1,5 @@
+flask
+alpaca-py
+python-dotenv
+gunicorn
+pytz
