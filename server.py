@@ -211,7 +211,24 @@ def webhook():
                     "existing_qty": str(existing_position.qty)
                 }), 200
             except:
-                pass  # No position exists, proceed with buy
+                pass  # No position exists, continue checks
+            
+            # Check for existing open/pending buy orders (e.g. unfilled limit orders)
+            open_buy_orders = trading_client.get_orders(
+                filter=GetOrdersRequest(
+                    status=QueryOrderStatus.OPEN,
+                    symbols=[symbol],
+                    side=OrderSide.BUY
+                )
+            )
+            if open_buy_orders:
+                pending_qty = sum(float(o.qty) - float(o.filled_qty) for o in open_buy_orders)
+                print(f"SKIP: {symbol} already has {len(open_buy_orders)} open buy order(s) ({pending_qty} shares pending)")
+                return jsonify({
+                    "status": "skipped",
+                    "reason": f"Existing buy order(s) for {symbol} ({pending_qty} shares pending)",
+                    "symbol": symbol
+                }), 200
             
             # Calculate 1% of account balance
             account = trading_client.get_account()
