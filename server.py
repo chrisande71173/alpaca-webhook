@@ -25,6 +25,10 @@ TRADE_PERCENT = 0.01  # 1% of account balance
 MIN_NOTIONAL = 1.00   # Minimum dollar amount for an order
 LIMIT_PRICE_BUFFER = 0.05  # 5% buffer for limit orders
 
+# Take-profit: automatically place a sell limit after a market-hours buy fills
+# Set to 0 to disable, e.g. 0.05 = 5% above fill price
+TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "0"))
+
 # Track non-tradable assets to avoid repeated failures
 non_tradable_assets = set()
 
@@ -126,7 +130,7 @@ def webhook():
         # For SELL orders, check if we have an open position first
         if is_sell:
             try:
-                # Check for existing open/pending sell orders to prevent duplicates
+                # Check for existing open/pending sell orders
                 open_orders = trading_client.get_orders(
                     filter=GetOrdersRequest(
                         status=QueryOrderStatus.OPEN,
@@ -135,13 +139,19 @@ def webhook():
                     )
                 )
                 if open_orders:
-                    pending_qty = sum(float(o.qty) - float(o.filled_qty) for o in open_orders)
-                    print(f"SKIP: {symbol} already has {len(open_orders)} open sell order(s) ({pending_qty} shares pending)")
-                    return jsonify({
-                        "status": "skipped",
-                        "reason": f"Existing sell order(s) for {symbol} ({pending_qty} shares pending)",
-                        "symbol": symbol
-                    }), 200
+                    # Stop-loss/sell_all: cancel existing sell orders (e.g. take-profit) and proceed
+                    if action_lower in ["sell", "sell_all"]:
+                        for o in open_orders:
+                            trading_client.cancel_order_by_id(o.id)
+                            print(f"CANCELLED existing sell order {o.id} for {symbol} (replacing with stop-loss)")
+                    else:
+                        pending_qty = sum(float(o.qty) - float(o.filled_qty) for o in open_orders)
+                        print(f"SKIP: {symbol} already has {len(open_orders)} open sell order(s) ({pending_qty} shares pending)")
+                        return jsonify({
+                            "status": "skipped",
+                            "reason": f"Existing sell order(s) for {symbol} ({pending_qty} shares pending)",
+                            "symbol": symbol
+                        }), 200
 
                 position = trading_client.get_open_position(symbol)
                 total_qty = float(position.qty)
@@ -288,12 +298,35 @@ def webhook():
         
         print(f"SUCCESS: Order placed - {action} {symbol}, Order ID: {order.id}")
         
-        return jsonify({
+        # Place take-profit sell limit after a market-hours buy fills
+        take_profit_order_id = None
+        if not is_sell and market_open and TAKE_PROFIT_PERCENT > 0 and tv_price and tv_price > 0:
+            try:
+                tp_price = round(tv_price * (1 + TAKE_PROFIT_PERCENT), 2)
+                tp_order = trading_client.submit_order(
+                    LimitOrderRequest(
+                        symbol=symbol,
+                        qty=qty,
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        limit_price=tp_price
+                    )
+                )
+                take_profit_order_id = str(tp_order.id)
+                print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price} (+{TAKE_PROFIT_PERCENT*100}%), Order ID: {tp_order.id}")
+            except Exception as tp_error:
+                print(f"WARNING: Failed to place take-profit for {symbol}: {tp_error}")
+        
+        response = {
             "status": "success",
             "order_id": str(order.id),
             "symbol": symbol,
             "side": action
-        })
+        }
+        if take_profit_order_id:
+            response["take_profit_order_id"] = take_profit_order_id
+        
+        return jsonify(response)
     
     except Exception as e:
         error_str = str(e)
