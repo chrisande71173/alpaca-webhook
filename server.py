@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 from datetime import datetime
 import pytz
 from flask import Flask, request, jsonify
@@ -33,7 +35,6 @@ TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "0"))
 non_tradable_assets = set()
 
 # Track symbols with pending orders to prevent race conditions
-import threading
 pending_orders = {}
 pending_lock = threading.Lock()
 
@@ -50,6 +51,52 @@ def is_market_open():
     market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return market_open <= now <= market_close
+
+# Polling config for after-hours buy fill detection
+POLL_INTERVAL = 5      # seconds between checks
+POLL_TIMEOUT = 3600    # max seconds to poll (60 minutes)
+
+def poll_for_buy_fill(order_id, symbol, qty, buy_price):
+    """Background thread: poll until an after-hours buy fills, then place take-profit."""
+    print(f"POLL START: Watching order {order_id} for {symbol} (every {POLL_INTERVAL}s, timeout {POLL_TIMEOUT}s)")
+    elapsed = 0
+    while elapsed < POLL_TIMEOUT:
+        time.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
+        try:
+            order = trading_client.get_order_by_id(order_id)
+            status = str(order.status).lower()
+            
+            if status == "filled":
+                fill_price = float(order.filled_avg_price) if order.filled_avg_price else buy_price
+                tp_price = round(fill_price * (1 + TAKE_PROFIT_PERCENT), 2)
+                print(f"POLL FILLED: {symbol} buy filled at ${fill_price}, placing take-profit at ${tp_price}")
+                try:
+                    tp_order = trading_client.submit_order(
+                        LimitOrderRequest(
+                            symbol=symbol,
+                            qty=int(float(order.filled_qty)),
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.GTC,
+                            limit_price=tp_price
+                        )
+                    )
+                    print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price}, Order ID: {tp_order.id}")
+                except Exception as tp_err:
+                    print(f"WARNING: Failed to place take-profit for {symbol}: {tp_err}")
+                return
+            
+            elif status in ["cancelled", "canceled", "expired", "rejected"]:
+                print(f"POLL STOP: {symbol} buy order {status}, no take-profit needed")
+                return
+            
+            else:
+                print(f"POLL CHECK: {symbol} order status={status} ({elapsed}s elapsed)")
+        
+        except Exception as poll_err:
+            print(f"POLL ERROR: {symbol} - {poll_err}")
+    
+    print(f"POLL TIMEOUT: {symbol} buy order not filled after {POLL_TIMEOUT}s, stopping watch")
 
 def get_limit_price(base_price, side):
     """Calculate limit price from TradingView price with buffer."""
@@ -298,24 +345,35 @@ def webhook():
         
         print(f"SUCCESS: Order placed - {action} {symbol}, Order ID: {order.id}")
         
-        # Place take-profit sell limit after a market-hours buy fills
+        # Place take-profit sell limit after buy
         take_profit_order_id = None
-        if not is_sell and market_open and TAKE_PROFIT_PERCENT > 0 and tv_price and tv_price > 0:
-            try:
-                tp_price = round(tv_price * (1 + TAKE_PROFIT_PERCENT), 2)
-                tp_order = trading_client.submit_order(
-                    LimitOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC,
-                        limit_price=tp_price
+        if not is_sell and TAKE_PROFIT_PERCENT > 0 and tv_price and tv_price > 0:
+            if market_open:
+                # Market hours: buy fills instantly, place take-profit immediately
+                try:
+                    tp_price = round(tv_price * (1 + TAKE_PROFIT_PERCENT), 2)
+                    tp_order = trading_client.submit_order(
+                        LimitOrderRequest(
+                            symbol=symbol,
+                            qty=qty,
+                            side=OrderSide.SELL,
+                            time_in_force=TimeInForce.GTC,
+                            limit_price=tp_price
+                        )
                     )
+                    take_profit_order_id = str(tp_order.id)
+                    print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price} (+{TAKE_PROFIT_PERCENT*100}%), Order ID: {tp_order.id}")
+                except Exception as tp_error:
+                    print(f"WARNING: Failed to place take-profit for {symbol}: {tp_error}")
+            else:
+                # Extended hours: buy may not fill yet, start polling thread
+                t = threading.Thread(
+                    target=poll_for_buy_fill,
+                    args=(str(order.id), symbol, qty, tv_price),
+                    daemon=True
                 )
-                take_profit_order_id = str(tp_order.id)
-                print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price} (+{TAKE_PROFIT_PERCENT*100}%), Order ID: {tp_order.id}")
-            except Exception as tp_error:
-                print(f"WARNING: Failed to place take-profit for {symbol}: {tp_error}")
+                t.start()
+                print(f"POLL THREAD: Started watching {symbol} buy order {order.id} for fill")
         
         response = {
             "status": "success",
