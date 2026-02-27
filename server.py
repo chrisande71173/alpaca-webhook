@@ -67,7 +67,7 @@ def poll_for_buy_fill(order_id, symbol, qty, buy_price):
             order = trading_client.get_order_by_id(order_id)
             status = str(order.status).lower()
             
-            if status == "filled":
+            if "filled" in status:
                 fill_price = float(order.filled_avg_price) if order.filled_avg_price else buy_price
                 tp_price = round(fill_price * (1 + TAKE_PROFIT_PERCENT), 2)
                 print(f"POLL FILLED: {symbol} buy filled at ${fill_price}, placing take-profit at ${tp_price}")
@@ -86,7 +86,7 @@ def poll_for_buy_fill(order_id, symbol, qty, buy_price):
                     print(f"WARNING: Failed to place take-profit for {symbol}: {tp_err}")
                 return
             
-            elif status in ["cancelled", "canceled", "expired", "rejected"]:
+            elif any(s in status for s in ["cancelled", "canceled", "expired", "rejected"]):
                 print(f"POLL STOP: {symbol} buy order {status}, no take-profit needed")
                 return
             
@@ -349,7 +349,8 @@ def webhook():
         take_profit_order_id = None
         if not is_sell and TAKE_PROFIT_PERCENT > 0 and tv_price and tv_price > 0:
             if market_open:
-                # Market hours: buy fills instantly, place take-profit immediately
+                # Market hours: short delay to let buy order settle (avoids wash trade rejection)
+                time.sleep(2)
                 try:
                     tp_price = round(tv_price * (1 + TAKE_PROFIT_PERCENT), 2)
                     tp_order = trading_client.submit_order(
