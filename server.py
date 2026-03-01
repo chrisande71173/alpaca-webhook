@@ -77,11 +77,12 @@ def poll_for_buy_fill(order_id, symbol, qty, buy_price):
                             symbol=symbol,
                             qty=int(float(order.filled_qty)),
                             side=OrderSide.SELL,
-                            time_in_force=TimeInForce.GTC,
-                            limit_price=tp_price
+                            time_in_force=TimeInForce.DAY,
+                            limit_price=tp_price,
+                            extended_hours=True
                         )
                     )
-                    print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price}, Order ID: {tp_order.id}")
+                    print(f"TAKE-PROFIT (ext hrs): Placed sell limit for {symbol} at ${tp_price}, Order ID: {tp_order.id}")
                 except Exception as tp_err:
                     print(f"WARNING: Failed to place take-profit for {symbol}: {tp_err}")
                 return
@@ -152,7 +153,7 @@ def webhook():
     action_lower = action.lower()
     
     # Determine if this is a buy or sell action
-    is_sell = action_lower in ["sell", "sell_half", "sell_all"]
+    is_sell = action_lower in ["sell", "sell_half", "sell_all", "sell_limit"]
     
     # Only lock BUY orders to prevent duplicates
     # SELL orders don't need locking - they're idempotent (server checks position exists)
@@ -187,7 +188,7 @@ def webhook():
                 )
                 if open_orders:
                     # Stop-loss/sell_all: cancel existing sell orders (e.g. take-profit) and proceed
-                    if action_lower in ["sell", "sell_all"]:
+                    if action_lower in ["sell", "sell_all", "sell_limit"]:
                         for o in open_orders:
                             trading_client.cancel_order_by_id(o.id)
                             print(f"CANCELLED existing sell order {o.id} for {symbol} (replacing with stop-loss)")
@@ -229,7 +230,31 @@ def webhook():
                     # Reset sell_half tracking (position closed)
                     sell_half_taken.discard(symbol)
                 
-                if market_open:
+                if action_lower == "sell_limit":
+                    # sell_limit: limit sell at exact TradingView price (no buffer)
+                    if not tv_price or tv_price <= 0:
+                        return jsonify({"error": "sell_limit requires a valid price"}), 400
+                    limit_price = round(float(tv_price), 2)
+                    if market_open:
+                        print(f"SELL LIMIT: {qty} shares of {symbol} at ${limit_price} (GTC)")
+                        order_data = LimitOrderRequest(
+                            symbol=symbol,
+                            qty=qty,
+                            side=side,
+                            time_in_force=TimeInForce.GTC,
+                            limit_price=limit_price
+                        )
+                    else:
+                        print(f"SELL LIMIT (ext hrs): {qty} shares of {symbol} at ${limit_price} (DAY+ext)")
+                        order_data = LimitOrderRequest(
+                            symbol=symbol,
+                            qty=qty,
+                            side=side,
+                            time_in_force=TimeInForce.DAY,
+                            limit_price=limit_price,
+                            extended_hours=True
+                        )
+                elif market_open:
                     order_data = MarketOrderRequest(
                         symbol=symbol,
                         qty=qty,
