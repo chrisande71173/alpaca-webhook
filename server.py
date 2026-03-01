@@ -31,6 +31,10 @@ LIMIT_PRICE_BUFFER = 0.05  # 5% buffer for limit orders
 # Set to 0 to disable, e.g. 0.05 = 5% above fill price
 TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "0"))
 
+# sell_limit action: place a limit sell this % above the current price
+# e.g. 0.10 = 10% above current price
+SELL_LIMIT_PERCENT = float(os.getenv("SELL_LIMIT_PERCENT", "0"))
+
 # Track non-tradable assets to avoid repeated failures
 non_tradable_assets = set()
 
@@ -231,12 +235,12 @@ def webhook():
                     sell_half_taken.discard(symbol)
                 
                 if action_lower == "sell_limit":
-                    # sell_limit: limit sell at exact TradingView price (no buffer)
+                    # sell_limit: limit sell at SELL_LIMIT_PERCENT above current price
                     if not tv_price or tv_price <= 0:
                         return jsonify({"error": "sell_limit requires a valid price"}), 400
-                    limit_price = round(float(tv_price), 2)
+                    limit_price = round(float(tv_price) * (1 + SELL_LIMIT_PERCENT), 2)
                     if market_open:
-                        print(f"SELL LIMIT: {qty} shares of {symbol} at ${limit_price} (GTC)")
+                        print(f"SELL LIMIT: {qty} shares of {symbol} at ${limit_price} (+{SELL_LIMIT_PERCENT*100}% above ${tv_price}) (GTC)")
                         order_data = LimitOrderRequest(
                             symbol=symbol,
                             qty=qty,
@@ -245,7 +249,7 @@ def webhook():
                             limit_price=limit_price
                         )
                     else:
-                        print(f"SELL LIMIT (ext hrs): {qty} shares of {symbol} at ${limit_price} (DAY+ext)")
+                        print(f"SELL LIMIT (ext hrs): {qty} shares of {symbol} at ${limit_price} (+{SELL_LIMIT_PERCENT*100}% above ${tv_price}) (DAY+ext)")
                         order_data = LimitOrderRequest(
                             symbol=symbol,
                             qty=qty,
