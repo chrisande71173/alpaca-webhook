@@ -46,7 +46,8 @@ This gives you a URL like `https://abc123.ngrok.io` - use this in TradingView al
 | `/webhook` | POST | Receives TradingView alerts |
 | `/health` | GET | Health check |
 | `/account` | GET | Check Alpaca account info (password-protected) |
-| `/settings` | GET | Web page for viewing and changing the trading settings (password-protected) |
+| `/settings` | GET | Web page for viewing and changing the trading settings (sign-in required) |
+| `/login`, `/logout` | GET / POST | Sign in to and out of the settings page |
 | `/api/settings` | GET / POST | The same settings as JSON (password-protected) |
 
 ## Settings page
@@ -67,9 +68,11 @@ editing code or redeploying:
 Changes apply to the next alert. Each value is checked against an allowed
 range, and a bad value saves nothing.
 
-- **Password:** set `ADMIN_PASSWORD`. The browser asks for it (any username
-  works). Without `ADMIN_PASSWORD` the page is turned off. `/account` uses the
-  same password.
+- **Password:** set `ADMIN_PASSWORD`, then sign in on the login page. You stay
+  signed in for 30 days (Sign out is on the settings page); changing the
+  password signs everyone out. Without `ADMIN_PASSWORD` the page is turned
+  off. `/account` uses the same sign-in, and scripts can send the password
+  with HTTP Basic auth (e.g. `curl -u any:password`).
 - **Saving:** values are written to `settings.json`, or to `SETTINGS_PATH` if
   set. On Railway, add a volume mounted at `/data` and set
   `SETTINGS_PATH=/data/settings.json`, otherwise saved values reset on every

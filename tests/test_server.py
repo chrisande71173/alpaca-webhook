@@ -39,15 +39,24 @@ def test_settings_page_is_off_without_an_admin_password(client, monkeypatch):
         assert client.get(path, headers=basic_auth("anything")).status_code == 403
 
 
-def test_settings_page_asks_for_a_password(client):
+def test_settings_page_sends_you_to_the_login_page(client):
     response = client.get("/settings")
 
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/login?next=/settings")
+    # No browser password pop-up any more.
+    assert "WWW-Authenticate" not in response.headers
+
+
+def test_api_answers_401_instead_of_redirecting(client):
+    response = client.get("/api/settings")
+
     assert response.status_code == 401
-    assert "Basic" in response.headers["WWW-Authenticate"]
+    assert response.get_json()["error"] == "Sign in required"
 
 
 def test_wrong_password_is_refused(client):
-    assert client.get("/settings", headers=basic_auth("nope")).status_code == 401
+    assert client.get("/settings", headers=basic_auth("nope")).status_code == 302
     assert client.post(
         "/api/settings", json={"TRADE_PERCENT": 0.5}, headers=basic_auth("nope")
     ).status_code == 401
@@ -58,6 +67,98 @@ def test_right_password_shows_the_page(client):
 
     assert response.status_code == 200
     assert b"Trader settings" in response.data
+
+
+# --- Login page --------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def no_login_delay(monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURE_DELAY", 0)
+
+
+def test_login_page_shows_a_password_field(client):
+    response = client.get("/login?next=/settings")
+
+    assert response.status_code == 200
+    assert b'type="password"' in response.data
+    assert b'value="/settings"' in response.data
+
+
+def test_signing_in_opens_the_page_you_asked_for(client):
+    response = client.post("/login", data={"password": PASSWORD, "next": "/settings"})
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/settings")
+    assert client.get("/settings").status_code == 200
+    assert client.get("/api/settings").status_code == 200
+
+
+def test_the_session_is_remembered(client):
+    response = client.post("/login", data={"password": PASSWORD})
+
+    cookie = response.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie
+    assert "SameSite=Lax" in cookie
+    assert "Expires=" in cookie  # kept across browser restarts (30 days)
+
+
+def test_a_wrong_password_shows_an_error(client):
+    response = client.post("/login", data={"password": "nope", "next": "/settings"})
+
+    assert response.status_code == 401
+    assert b"Wrong password." in response.data
+    assert client.get("/settings").status_code == 302
+
+
+def test_a_wrong_password_is_slowed_down(client, monkeypatch):
+    delays = []
+    monkeypatch.setattr(server, "LOGIN_FAILURE_DELAY", 1.0)
+    monkeypatch.setattr(server.time, "sleep", delays.append)
+
+    client.post("/login", data={"password": "nope"})
+
+    assert delays == [1.0]
+
+
+def test_login_only_redirects_within_the_site(client):
+    for target in ("https://evil.example", "//evil.example", "javascript:alert(1)"):
+        response = client.post("/login", data={"password": PASSWORD, "next": target})
+        assert response.headers["Location"].endswith("/settings"), target
+
+
+def test_already_signed_in_skips_the_login_page(client):
+    client.post("/login", data={"password": PASSWORD})
+
+    response = client.get("/login")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/settings")
+
+
+def test_signing_out_ends_the_session(client):
+    client.post("/login", data={"password": PASSWORD})
+
+    response = client.get("/logout")
+
+    assert response.headers["Location"].endswith("/login")
+    assert client.get("/settings").status_code == 302
+
+
+def test_login_page_says_when_the_settings_page_is_off(client, monkeypatch):
+    monkeypatch.setattr(server, "ADMIN_PASSWORD", None)
+
+    get = client.get("/login")
+    post = client.post("/login", data={"password": ""})
+
+    assert get.status_code == 403
+    assert b"ADMIN_PASSWORD" in get.data
+    assert post.status_code == 403
+
+
+def test_the_settings_page_has_a_sign_out_link(client):
+    client.post("/login", data={"password": PASSWORD})
+
+    assert b'href="/logout"' in client.get("/settings").data
 
 
 def test_the_bare_domain_opens_the_settings_page(client):

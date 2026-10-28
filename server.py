@@ -1,11 +1,12 @@
+import hashlib
 import hmac
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 import pytz
-from flask import Flask, Response, redirect, request, jsonify, render_template
+from flask import Flask, redirect, request, jsonify, render_template, session
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
@@ -33,6 +34,20 @@ settings = SettingsStore()
 
 # Password for the /settings page. Without it the page is turned off.
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+
+# Signed-in sessions. The signing key is derived from ADMIN_PASSWORD, so no
+# extra variable is needed and changing the password signs everyone out.
+app.config.update(
+    SECRET_KEY=hashlib.sha256(f"trader-session:{ADMIN_PASSWORD or ''}".encode()).hexdigest(),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # Railway serves over HTTPS; locally it's plain HTTP.
+    SESSION_COOKIE_SECURE=bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_ENVIRONMENT_NAME")),
+)
+
+# Slows password guessing.
+LOGIN_FAILURE_DELAY = 1.0
 
 # Track non-tradable assets to avoid repeated failures
 non_tradable_assets = set()
@@ -450,25 +465,74 @@ def webhook():
                 pending_orders.pop(symbol, None)
 
 
-def require_admin(view):
-    """Protects the settings page with a browser password prompt (HTTP Basic auth).
+def _password_matches(supplied):
+    return bool(ADMIN_PASSWORD) and hmac.compare_digest(
+        (supplied or "").encode(), ADMIN_PASSWORD.encode()
+    )
 
-    Any username works; the password must match ADMIN_PASSWORD. If
+
+def _is_signed_in():
+    if session.get("admin"):
+        return True
+    # Scripts (e.g. curl -u any:password) can still send the password directly.
+    auth = request.authorization
+    return bool(auth) and _password_matches(auth.password)
+
+
+def _safe_next(target):
+    """Only redirect back to a page on this site after signing in."""
+    if target and target.startswith("/") and not target.startswith("//"):
+        return target
+    return "/settings"
+
+
+def require_admin(view):
+    """Requires signing in with ADMIN_PASSWORD (see /login).
+
+    Pages redirect to the login page; JSON endpoints answer 401. If
     ADMIN_PASSWORD isn't set, the settings page is turned off entirely.
     """
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not ADMIN_PASSWORD:
             return jsonify({"error": "Settings page is disabled: set ADMIN_PASSWORD to enable it"}), 403
-        auth = request.authorization
-        supplied = (auth.password or "") if auth else ""
-        if not hmac.compare_digest(supplied.encode(), ADMIN_PASSWORD.encode()):
-            return Response(
-                "Password required", 401,
-                {"WWW-Authenticate": 'Basic realm="Trader settings", charset="UTF-8"'},
-            )
-        return view(*args, **kwargs)
+        if _is_signed_in():
+            return view(*args, **kwargs)
+        if request.path.startswith("/api/") or request.path == "/account":
+            return jsonify({"error": "Sign in required"}), 401
+        return redirect(f"/login?next={request.path}")
     return wrapped
+
+
+@app.route("/login", methods=["GET"])
+def login_page():
+    if not ADMIN_PASSWORD:
+        return render_template("login.html", disabled=True), 403
+    next_page = _safe_next(request.args.get("next"))
+    if session.get("admin"):
+        return redirect(next_page)
+    return render_template("login.html", next=next_page)
+
+
+@app.route("/login", methods=["POST"])
+def login():
+    if not ADMIN_PASSWORD:
+        return render_template("login.html", disabled=True), 403
+    next_page = _safe_next(request.form.get("next"))
+    if not _password_matches(request.form.get("password")):
+        time.sleep(LOGIN_FAILURE_DELAY)
+        print("LOGIN: failed attempt")
+        return render_template("login.html", next=next_page, error="Wrong password."), 401
+    session.clear()
+    session["admin"] = True
+    session.permanent = True
+    return redirect(next_page)
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 def _settings_payload():
