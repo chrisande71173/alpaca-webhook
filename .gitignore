@@ -6,3 +6,10 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+
+# Settings saved from the /settings page (local runs)
+settings.json
+settings.json.tmp
+
+# Tests
+.pytest_cache/

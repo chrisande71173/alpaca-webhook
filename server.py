@@ -1,15 +1,19 @@
+import hmac
 import os
 import time
 import threading
 from datetime import datetime
+from functools import wraps
 import pytz
-from flask import Flask, request, jsonify
+from flask import Flask, Response, redirect, request, jsonify, render_template
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from settings import SETTINGS, SettingsError, SettingsStore  # noqa: E402  (after load_dotenv)
 
 app = Flask(__name__)
 
@@ -22,18 +26,13 @@ trading_client = TradingClient(
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
-# Percentage of account to use per trade
-TRADE_PERCENT = 0.01  # 1% of account balance
-MIN_NOTIONAL = 1.00   # Minimum dollar amount for an order
-LIMIT_PRICE_BUFFER = 0.05  # 5% buffer for limit orders
+# Trade size, limit buffer, take-profit, sell-limit offset and fill polling
+# are editable from the /settings page; see settings.py for each one's
+# meaning, default and allowed range.
+settings = SettingsStore()
 
-# Take-profit: automatically place a sell limit after a market-hours buy fills
-# Set to 0 to disable, e.g. 0.05 = 5% above fill price
-TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "0"))
-
-# sell_limit action: place a limit sell this % above the current price
-# e.g. 0.10 = 10% above current price
-SELL_LIMIT_PERCENT = float(os.getenv("SELL_LIMIT_PERCENT", "0"))
+# Password for the /settings page. Without it the page is turned off.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 # Track non-tradable assets to avoid repeated failures
 non_tradable_assets = set()
@@ -56,24 +55,24 @@ def is_market_open():
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return market_open <= now <= market_close
 
-# Polling config for after-hours buy fill detection
-POLL_INTERVAL = 5      # seconds between checks
-POLL_TIMEOUT = 3600    # max seconds to poll (60 minutes)
-
 def poll_for_buy_fill(order_id, symbol, qty, buy_price):
     """Background thread: poll until an after-hours buy fills, then place take-profit."""
-    print(f"POLL START: Watching order {order_id} for {symbol} (every {POLL_INTERVAL}s, timeout {POLL_TIMEOUT}s)")
+    # Read once, so a change on the settings page applies to the next watch.
+    poll_interval = settings.get("POLL_INTERVAL")
+    poll_timeout = settings.get("POLL_TIMEOUT")
+    take_profit_percent = settings.get("TAKE_PROFIT_PERCENT")
+    print(f"POLL START: Watching order {order_id} for {symbol} (every {poll_interval}s, timeout {poll_timeout}s)")
     elapsed = 0
-    while elapsed < POLL_TIMEOUT:
-        time.sleep(POLL_INTERVAL)
-        elapsed += POLL_INTERVAL
+    while elapsed < poll_timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
         try:
             order = trading_client.get_order_by_id(order_id)
             status = str(order.status).lower()
             
             if "filled" in status:
                 fill_price = float(order.filled_avg_price) if order.filled_avg_price else buy_price
-                tp_price = round(fill_price * (1 + TAKE_PROFIT_PERCENT), 2)
+                tp_price = round(fill_price * (1 + take_profit_percent), 2)
                 print(f"POLL FILLED: {symbol} buy filled at ${fill_price}, placing take-profit at ${tp_price}")
                 try:
                     tp_order = trading_client.submit_order(
@@ -101,16 +100,16 @@ def poll_for_buy_fill(order_id, symbol, qty, buy_price):
         except Exception as poll_err:
             print(f"POLL ERROR: {symbol} - {poll_err}")
     
-    print(f"POLL TIMEOUT: {symbol} buy order not filled after {POLL_TIMEOUT}s, stopping watch")
+    print(f"POLL TIMEOUT: {symbol} buy order not filled after {poll_timeout}s, stopping watch")
 
-def get_limit_price(base_price, side):
+def get_limit_price(base_price, side, buffer):
     """Calculate limit price from TradingView price with buffer."""
     if side == OrderSide.BUY:
         # Buy slightly above current price to ensure fill
-        limit_price = round(base_price * (1 + LIMIT_PRICE_BUFFER), 2)
+        limit_price = round(base_price * (1 + buffer), 2)
     else:
         # Sell slightly below current price to ensure fill
-        limit_price = round(base_price * (1 - LIMIT_PRICE_BUFFER), 2)
+        limit_price = round(base_price * (1 - buffer), 2)
     
     print(f"TradingView price: ${base_price}, Limit price: ${limit_price}")
     return limit_price
@@ -138,6 +137,10 @@ def webhook():
         print("ERROR: Invalid secret")
         return jsonify({"error": "Unauthorized"}), 401
     
+    # One snapshot per alert, so a change on the settings page never mixes
+    # old and new values within a single trade.
+    cfg = settings.all()
+
     symbol = data.get("symbol")
     action = data.get("action")  # "buy" or "sell"
     tv_price = data.get("price")  # Price from TradingView
@@ -238,9 +241,9 @@ def webhook():
                     # sell_limit: limit sell at SELL_LIMIT_PERCENT above current price
                     if not tv_price or tv_price <= 0:
                         return jsonify({"error": "sell_limit requires a valid price"}), 400
-                    limit_price = round(float(tv_price) * (1 + SELL_LIMIT_PERCENT), 2)
+                    limit_price = round(float(tv_price) * (1 + cfg["SELL_LIMIT_PERCENT"]), 2)
                     if market_open:
-                        print(f"SELL LIMIT: {qty} shares of {symbol} at ${limit_price} (+{SELL_LIMIT_PERCENT*100}% above ${tv_price}) (GTC)")
+                        print(f"SELL LIMIT: {qty} shares of {symbol} at ${limit_price} (+{cfg['SELL_LIMIT_PERCENT']*100}% above ${tv_price}) (GTC)")
                         order_data = LimitOrderRequest(
                             symbol=symbol,
                             qty=qty,
@@ -249,7 +252,7 @@ def webhook():
                             limit_price=limit_price
                         )
                     else:
-                        print(f"SELL LIMIT (ext hrs): {qty} shares of {symbol} at ${limit_price} (+{SELL_LIMIT_PERCENT*100}% above ${tv_price}) (DAY+ext)")
+                        print(f"SELL LIMIT (ext hrs): {qty} shares of {symbol} at ${limit_price} (+{cfg['SELL_LIMIT_PERCENT']*100}% above ${tv_price}) (DAY+ext)")
                         order_data = LimitOrderRequest(
                             symbol=symbol,
                             qty=qty,
@@ -267,7 +270,7 @@ def webhook():
                     )
                 else:
                     # Extended hours - use limit order with TradingView price
-                    limit_price = get_limit_price(tv_price, side)
+                    limit_price = get_limit_price(tv_price, side, cfg["LIMIT_PRICE_BUFFER"])
                     print(f"Extended hours SELL - limit price: ${limit_price}")
                     order_data = LimitOrderRequest(
                         symbol=symbol,
@@ -319,18 +322,18 @@ def webhook():
             # Calculate 1% of account balance
             account = trading_client.get_account()
             buying_power = float(account.buying_power)
-            notional_amount = round(buying_power * TRADE_PERCENT, 2)
+            notional_amount = round(buying_power * cfg["TRADE_PERCENT"], 2)
             
             # Check minimum notional
-            if notional_amount < MIN_NOTIONAL:
-                print(f"SKIP: Notional ${notional_amount} below minimum ${MIN_NOTIONAL}")
+            if notional_amount < cfg["MIN_NOTIONAL"]:
+                print(f"SKIP: Notional ${notional_amount} below minimum ${cfg['MIN_NOTIONAL']}")
                 return jsonify({
                     "status": "skipped",
-                    "reason": f"Insufficient funds (${notional_amount} < ${MIN_NOTIONAL})",
+                    "reason": f"Insufficient funds (${notional_amount} < ${cfg['MIN_NOTIONAL']})",
                     "symbol": symbol
                 }), 200
             
-            print(f"Account buying power: ${buying_power:.2f}, Trading ${notional_amount:.2f} ({TRADE_PERCENT*100}%)")
+            print(f"Account buying power: ${buying_power:.2f}, Trading ${notional_amount:.2f} ({cfg['TRADE_PERCENT']*100}%)")
             
             # Reset sell_half tracking for this symbol (new position)
             sell_half_taken.discard(symbol)
@@ -359,7 +362,7 @@ def webhook():
                 )
             else:
                 # Extended hours - use limit order
-                limit_price = get_limit_price(tv_price, side)
+                limit_price = get_limit_price(tv_price, side, cfg["LIMIT_PRICE_BUFFER"])
                 print(f"Extended hours BUY - {qty} shares at limit ${limit_price}")
                 order_data = LimitOrderRequest(
                     symbol=symbol,
@@ -376,12 +379,12 @@ def webhook():
         
         # Place take-profit sell limit after buy
         take_profit_order_id = None
-        if not is_sell and TAKE_PROFIT_PERCENT > 0 and tv_price and tv_price > 0:
+        if not is_sell and cfg["TAKE_PROFIT_PERCENT"] > 0 and tv_price and tv_price > 0:
             if market_open:
                 # Market hours: short delay to let buy order settle (avoids wash trade rejection)
                 time.sleep(2)
                 try:
-                    tp_price = round(tv_price * (1 + TAKE_PROFIT_PERCENT), 2)
+                    tp_price = round(tv_price * (1 + cfg["TAKE_PROFIT_PERCENT"]), 2)
                     tp_order = trading_client.submit_order(
                         LimitOrderRequest(
                             symbol=symbol,
@@ -392,7 +395,7 @@ def webhook():
                         )
                     )
                     take_profit_order_id = str(tp_order.id)
-                    print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price} (+{TAKE_PROFIT_PERCENT*100}%), Order ID: {tp_order.id}")
+                    print(f"TAKE-PROFIT: Placed sell limit for {symbol} at ${tp_price} (+{cfg['TAKE_PROFIT_PERCENT']*100}%), Order ID: {tp_order.id}")
                 except Exception as tp_error:
                     print(f"WARNING: Failed to place take-profit for {symbol}: {tp_error}")
             else:
@@ -447,6 +450,84 @@ def webhook():
                 pending_orders.pop(symbol, None)
 
 
+def require_admin(view):
+    """Protects the settings page with a browser password prompt (HTTP Basic auth).
+
+    Any username works; the password must match ADMIN_PASSWORD. If
+    ADMIN_PASSWORD isn't set, the settings page is turned off entirely.
+    """
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not ADMIN_PASSWORD:
+            return jsonify({"error": "Settings page is disabled: set ADMIN_PASSWORD to enable it"}), 403
+        auth = request.authorization
+        supplied = (auth.password or "") if auth else ""
+        if not hmac.compare_digest(supplied.encode(), ADMIN_PASSWORD.encode()):
+            return Response(
+                "Password required", 401,
+                {"WWW-Authenticate": 'Basic realm="Trader settings", charset="UTF-8"'},
+            )
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _settings_payload():
+    values = settings.all()
+    return {
+        "paper": True,
+        "settings": [
+            {
+                "key": s.key,
+                "label": s.label,
+                "help": s.help,
+                "kind": s.kind,
+                "integer": s.integer,
+                "minimum": s.minimum,
+                "maximum": s.maximum,
+                "default": s.default,
+                "value": values[s.key],
+            }
+            for s in SETTINGS
+        ],
+    }
+
+
+@app.route("/", methods=["GET"])
+def home():
+    """The bare domain opens the settings page."""
+    return redirect("/settings")
+
+
+@app.route("/settings", methods=["GET"])
+@require_admin
+def settings_page():
+    """Web UI for viewing and changing the trading settings."""
+    return render_template("settings.html")
+
+
+@app.route("/api/settings", methods=["GET"])
+@require_admin
+def get_settings():
+    return jsonify(_settings_payload())
+
+
+@app.route("/api/settings", methods=["POST"])
+@require_admin
+def update_settings():
+    # JSON only: a cross-site form can't send it, which blocks CSRF.
+    if not request.is_json:
+        return jsonify({"error": "Send the changes as JSON"}), 415
+    changes = request.get_json(silent=True)
+    if not isinstance(changes, dict) or not changes:
+        return jsonify({"error": "Send an object of setting changes"}), 400
+    try:
+        settings.update(changes)
+    except SettingsError as error:
+        return jsonify({"error": str(error)}), 400
+    print(f"SETTINGS UPDATED: {changes}")
+    return jsonify(_settings_payload())
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint to verify server is running."""
@@ -474,4 +555,5 @@ if __name__ == "__main__":
     print("  POST /webhook  - Receive TradingView alerts")
     print("  GET  /health   - Health check")
     print("  GET  /account  - Check Alpaca account")
+    print("  GET  /settings - View and change trading settings (needs ADMIN_PASSWORD)")
     app.run(host="0.0.0.0", port=5000, debug=True)

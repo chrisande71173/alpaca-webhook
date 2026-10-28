@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trader settings</title>
+  <style>
+    :root {
+      --bg: #0f1419; --card: #182029; --line: #2a3542; --text: #e6edf3;
+      --muted: #8b98a5; --accent: #2f81f7; --good: #3fb950; --bad: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+    header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+    h1 { font-size: 22px; margin: 0; }
+    .badge {
+      font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
+      background: rgba(63, 185, 80, .15); color: var(--good); border: 1px solid rgba(63, 185, 80, .4);
+    }
+    .intro { color: var(--muted); margin: 0 0 24px; }
+    .setting {
+      background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+      padding: 16px; margin-bottom: 12px;
+    }
+    .setting.changed { border-color: var(--accent); }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    label { font-weight: 600; }
+    .help { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .meta button {
+      background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit;
+    }
+    .field { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .field span { color: var(--muted); min-width: 14px; }
+    input {
+      width: 120px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line);
+      background: var(--bg); color: var(--text); font: inherit; text-align: right;
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    input.invalid { border-color: var(--bad); }
+    .actions {
+      position: sticky; bottom: 0; display: flex; align-items: center; gap: 12px;
+      padding: 16px 0; background: linear-gradient(transparent, var(--bg) 30%);
+    }
+    .actions button {
+      padding: 10px 20px; border-radius: 6px; border: 1px solid var(--line);
+      background: var(--card); color: var(--text); font: inherit; cursor: pointer;
+    }
+    .actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .actions button:disabled { opacity: .5; cursor: default; }
+    #status { font-size: 14px; }
+    #status.ok { color: var(--good); }
+    #status.error { color: var(--bad); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trader settings</h1>
+    <span class="badge" id="mode" hidden>Paper trading</span>
+  </header>
+  <p class="intro">Changes take effect on the next TradingView alert. Nothing is saved until you press Save.</p>
+
+  <form id="form" novalidate></form>
+
+  <div class="actions">
+    <button type="submit" form="form" class="primary" id="save" disabled>Save changes</button>
+    <button type="button" id="discard" disabled>Discard</button>
+    <span id="status" role="status"></span>
+  </div>
+</main>
+
+<script>
+  const form = document.getElementById("form");
+  const saveButton = document.getElementById("save");
+  const discardButton = document.getElementById("discard");
+  const statusText = document.getElementById("status");
+  let current = [];  // settings as last loaded from the server
+
+  // Percent settings are stored as fractions (0.05) but shown as 5 (%).
+  const toDisplay = (s, v) => s.kind === "percent" ? round(v * 100) : v;
+  const fromDisplay = (s, v) => s.kind === "percent" ? v / 100 : v;
+  const round = (n) => Math.round(n * 1e6) / 1e6;
+  const unit = (s) => ({ percent: "%", dollars: "$", seconds: "sec" }[s.kind] || "");
+  const formatted = (s, v) =>
+    s.kind === "dollars" ? `$${v}` : `${toDisplay(s, v)}${s.kind === "percent" ? "%" : s.kind === "seconds" ? " sec" : ""}`;
+
+  function setStatus(message, kind) {
+    statusText.textContent = message;
+    statusText.className = kind || "";
+  }
+
+  function render(settings) {
+    current = settings;
+    form.innerHTML = "";
+    for (const s of settings) {
+      const card = document.createElement("div");
+      card.className = "setting";
+      card.dataset.key = s.key;
+      const prefix = s.kind === "dollars" ? "<span>$</span>" : "";
+      const suffix = s.kind !== "dollars" ? `<span>${unit(s)}</span>` : "";
+      card.innerHTML = `
+        <div class="row">
+          <label for="${s.key}">${s.label}</label>
+          <div class="field">
+            ${prefix}
+            <input id="${s.key}" type="number" inputmode="decimal"
+                   step="${s.integer ? 1 : "any"}"
+                   min="${toDisplay(s, s.minimum)}" max="${toDisplay(s, s.maximum)}"
+                   value="${toDisplay(s, s.value)}">
+            ${suffix}
+          </div>
+        </div>
+        <p class="help">${s.help}</p>
+        <div class="meta">
+          Default ${formatted(s, s.default)} · allowed ${formatted(s, s.minimum)} to ${formatted(s, s.maximum)}
+          · <button type="button" data-reset="${s.key}">Reset to default</button>
+        </div>`;
+      form.appendChild(card);
+    }
+    refresh();
+  }
+
+  // Returns {changes, valid}: only the settings that differ from the server.
+  function collect() {
+    const changes = {};
+    let valid = true;
+    for (const s of current) {
+      const input = document.getElementById(s.key);
+      const raw = input.value.trim();
+      const shown = Number(raw);
+      const ok = raw !== "" && Number.isFinite(shown)
+        && shown >= toDisplay(s, s.minimum) && shown <= toDisplay(s, s.maximum)
+        && (!s.integer || Number.isInteger(shown));
+      input.classList.toggle("invalid", !ok);
+      valid = valid && ok;
+      const changed = ok && round(fromDisplay(s, shown)) !== round(s.value);
+      input.closest(".setting").classList.toggle("changed", changed);
+      if (changed) changes[s.key] = fromDisplay(s, shown);
+    }
+    return { changes, valid };
+  }
+
+  function refresh() {
+    const { changes, valid } = collect();
+    const count = Object.keys(changes).length;
+    saveButton.disabled = !valid || count === 0;
+    discardButton.disabled = count === 0 && valid;
+    if (!valid) setStatus("Fix the highlighted values.", "error");
+    else if (count) setStatus(`${count} unsaved change${count > 1 ? "s" : ""}`);
+    else if (statusText.className !== "ok") setStatus("");
+  }
+
+  async function load() {
+    const response = await fetch("api/settings", { cache: "no-store" });
+    if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+    const data = await response.json();
+    document.getElementById("mode").hidden = !data.paper;
+    render(data.settings);
+  }
+
+  form.addEventListener("input", () => { if (statusText.className === "ok") setStatus(""); refresh(); });
+
+  form.addEventListener("click", (event) => {
+    const key = event.target.dataset.reset;
+    if (!key) return;
+    const s = current.find((item) => item.key === key);
+    document.getElementById(key).value = toDisplay(s, s.default);
+    refresh();
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const { changes, valid } = collect();
+    if (!valid || !Object.keys(changes).length) return;
+    saveButton.disabled = true;
+    setStatus("Saving…");
+    try {
+      const response = await fetch("api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      render(data.settings);
+      setStatus("Saved.", "ok");
+    } catch (error) {
+      setStatus(`Not saved: ${error.message}`, "error");
+      saveButton.disabled = false;
+    }
+  });
+
+  discardButton.addEventListener("click", () => { render(current); setStatus(""); });
+
+  load().catch((error) => setStatus(`Couldn't load settings: ${error.message}`, "error"));
+</script>
+</body>
+</html>
