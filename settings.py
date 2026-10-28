@@ -90,16 +90,28 @@ class SettingsStore:
         self._lock = threading.Lock()
         self._values = self._load()
 
+    def _env_default(self, key):
+        """The valid default an environment variable sets for key, or None."""
+        raw = os.getenv(key)
+        if key not in _ENV_DEFAULTS or raw in (None, ""):
+            return None
+        try:
+            return self._validate(_BY_KEY[key], raw)
+        except SettingsError as error:
+            print(f"WARNING: ignoring {key} environment variable: {error}")
+            return None
+
     def defaults(self):
         values = {setting.key: setting.default for setting in SETTINGS}
         for key in _ENV_DEFAULTS:
-            raw = os.getenv(key)
-            if raw not in (None, ""):
-                try:
-                    values[key] = self._validate(_BY_KEY[key], raw)
-                except SettingsError as error:
-                    print(f"WARNING: ignoring {key} environment variable: {error}")
+            env_value = self._env_default(key)
+            if env_value is not None:
+                values[key] = env_value
         return values
+
+    def env_default_keys(self):
+        """Settings whose default currently comes from an environment variable."""
+        return {key for key in _ENV_DEFAULTS if self._env_default(key) is not None}
 
     def _load(self):
         values = self.defaults()

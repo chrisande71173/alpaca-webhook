@@ -71,6 +71,26 @@ def test_any_username_works(client):
     assert client.get("/settings", headers=basic_auth(PASSWORD, "chris")).status_code == 200
 
 
+def test_account_needs_the_password(client, monkeypatch):
+    fake_account = SimpleNamespace(
+        status="ACTIVE", cash="100", buying_power="200", portfolio_value="300"
+    )
+    monkeypatch.setattr(
+        server, "trading_client", SimpleNamespace(get_account=lambda: fake_account)
+    )
+
+    assert client.get("/account").status_code == 401
+    assert client.get("/account", headers=basic_auth("nope")).status_code == 401
+
+    response = client.get("/account", headers=basic_auth(PASSWORD))
+    assert response.status_code == 200
+    assert response.get_json()["portfolio_value"] == "300"
+
+
+def test_health_stays_open_for_uptime_checks(client):
+    assert client.get("/health").status_code == 200
+
+
 # --- Settings API ------------------------------------------------------------
 
 def test_lists_every_setting_with_its_value_and_range(client):
@@ -87,8 +107,22 @@ def test_lists_every_setting_with_its_value_and_range(client):
         "minimum": 0.0001,
         "maximum": 1.0,
         "default": 0.01,
+        "default_from_env": False,
         "value": 0.01,
     }
+
+
+def test_a_default_set_by_an_env_var_is_shown_as_such(client, store, monkeypatch):
+    # e.g. SELL_LIMIT_PERCENT=0.1 set on Railway before the settings page existed
+    monkeypatch.setenv("SELL_LIMIT_PERCENT", "0.1")
+
+    data = client.get("/api/settings", headers=basic_auth(PASSWORD)).get_json()
+
+    sell_limit = next(s for s in data["settings"] if s["key"] == "SELL_LIMIT_PERCENT")
+    assert sell_limit["default"] == 0.1
+    assert sell_limit["default_from_env"] is True
+    take_profit = next(s for s in data["settings"] if s["key"] == "TAKE_PROFIT_PERCENT")
+    assert take_profit["default_from_env"] is False
 
 
 def test_saving_changes_the_value_and_persists_it(client, store):

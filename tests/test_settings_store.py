@@ -40,6 +40,13 @@ def test_existing_env_vars_still_set_the_defaults(path, monkeypatch):
     assert store.get("SELL_LIMIT_PERCENT") == 0.1
 
 
+def test_knows_which_defaults_come_from_env_vars(path, monkeypatch):
+    monkeypatch.setenv("SELL_LIMIT_PERCENT", "0.1")
+    monkeypatch.setenv("TAKE_PROFIT_PERCENT", "nonsense")
+
+    assert SettingsStore(path).env_default_keys() == {"SELL_LIMIT_PERCENT"}
+
+
 def test_an_invalid_env_var_is_ignored(path, monkeypatch):
     monkeypatch.setenv("TAKE_PROFIT_PERCENT", "lots")
 

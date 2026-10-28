@@ -117,7 +117,7 @@
         </div>
         <p class="help">${s.help}</p>
         <div class="meta">
-          Default ${formatted(s, s.default)} · allowed ${formatted(s, s.minimum)} to ${formatted(s, s.maximum)}
+          Default ${formatted(s, s.default)}${s.default_from_env ? ` (from the ${s.key} variable)` : ""} · allowed ${formatted(s, s.minimum)} to ${formatted(s, s.maximum)}
           · <button type="button" data-reset="${s.key}">Reset to default</button>
         </div>`;
       form.appendChild(card);

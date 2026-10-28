@@ -473,6 +473,10 @@ def require_admin(view):
 
 def _settings_payload():
     values = settings.all()
+    # The default the page shows and resets to is the one actually in effect,
+    # which an environment variable (e.g. on Railway) may have set.
+    defaults = settings.defaults()
+    from_env = settings.env_default_keys()
     return {
         "paper": True,
         "settings": [
@@ -484,7 +488,8 @@ def _settings_payload():
                 "integer": s.integer,
                 "minimum": s.minimum,
                 "maximum": s.maximum,
-                "default": s.default,
+                "default": defaults[s.key],
+                "default_from_env": s.key in from_env,
                 "value": values[s.key],
             }
             for s in SETTINGS
@@ -535,8 +540,9 @@ def health():
 
 
 @app.route("/account", methods=["GET"])
+@require_admin
 def account():
-    """Check your Alpaca account status."""
+    """Check your Alpaca account status (same password as the settings page)."""
     try:
         account = trading_client.get_account()
         return jsonify({
@@ -554,6 +560,6 @@ if __name__ == "__main__":
     print("Endpoints:")
     print("  POST /webhook  - Receive TradingView alerts")
     print("  GET  /health   - Health check")
-    print("  GET  /account  - Check Alpaca account")
+    print("  GET  /account  - Check Alpaca account (needs ADMIN_PASSWORD)")
     print("  GET  /settings - View and change trading settings (needs ADMIN_PASSWORD)")
     app.run(host="0.0.0.0", port=5000, debug=True)

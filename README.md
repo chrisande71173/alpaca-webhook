@@ -45,7 +45,7 @@ This gives you a URL like `https://abc123.ngrok.io` - use this in TradingView al
 |----------|--------|-------------|
 | `/webhook` | POST | Receives TradingView alerts |
 | `/health` | GET | Health check |
-| `/account` | GET | Check Alpaca account info |
+| `/account` | GET | Check Alpaca account info (password-protected) |
 | `/settings` | GET | Web page for viewing and changing the trading settings (password-protected) |
 | `/api/settings` | GET / POST | The same settings as JSON (password-protected) |
 
@@ -68,13 +68,15 @@ Changes apply to the next alert. Each value is checked against an allowed
 range, and a bad value saves nothing.
 
 - **Password:** set `ADMIN_PASSWORD`. The browser asks for it (any username
-  works). Without `ADMIN_PASSWORD` the page is turned off.
+  works). Without `ADMIN_PASSWORD` the page is turned off. `/account` uses the
+  same password.
 - **Saving:** values are written to `settings.json`, or to `SETTINGS_PATH` if
   set. On Railway, add a volume mounted at `/data` and set
   `SETTINGS_PATH=/data/settings.json`, otherwise saved values reset on every
   redeploy.
 - **Existing env vars:** `TAKE_PROFIT_PERCENT` and `SELL_LIMIT_PERCENT` still
-  work as defaults until a value is saved from the page.
+  work as defaults until a value is saved from the page. The page labels a
+  default that comes from one of them, and "Reset to default" uses it.
 
 ## TradingView Alert Message Format
 
